@@ -1,6 +1,7 @@
 import numpy as np
 from PIL import Image
 from sklearn.cluster import KMeans
+from scipy.spatial import cKDTree
 
 def compute_palette(pixels_rgb, n_colors, sample_size=100_000):
     """Calcule une palette de N couleurs par K-means."""
@@ -37,6 +38,33 @@ def quantize_image(pixels_rgb, palette, block_size=1_000_000):
     
     return labels
 
+def dither_image(pixels_rgb, palette, width, height):
+    """Quantifie chaque pixel vers la couleur la plus proche dans la palette,
+    en diffusant l'erreur de quantification (Floyd-Steinberg)."""
+    tree = cKDTree(palette.astype(np.float32))
+    work = pixels_rgb.astype(np.float32).reshape(height, width, 3)
+    labels = np.empty((height, width), dtype=np.uint8)
+
+    for y in range(height):
+        row = work[y]
+        next_row = work[y + 1] if y + 1 < height else None
+        for x in range(width):
+            old_pixel = row[x]
+            _, idx = tree.query(old_pixel)
+            labels[y, x] = idx
+            error = old_pixel - palette[idx]
+
+            if x + 1 < width:
+                row[x + 1] += error * (7 / 16)
+            if next_row is not None:
+                if x > 0:
+                    next_row[x - 1] += error * (3 / 16)
+                next_row[x] += error * (5 / 16)
+                if x + 1 < width:
+                    next_row[x + 1] += error * (1 / 16)
+
+    return labels.reshape(-1)
+
 def create_paletted_image(width, height, labels, palette, alpha=None):
     """Crée une image palettisée PNG avec transparence optionnelle."""
     indexed = labels.reshape(height, width)
@@ -58,10 +86,12 @@ def create_paletted_image(width, height, labels, palette, alpha=None):
     
     return img
 
-def process_image(image, n_colors, size=None, sample_size=100_000):
+def process_image(image, n_colors, size=None, sample_size=100_000, dither=False):
     """
     Traite une image PIL complète.
     Redimensionne vers `size` (largeur, hauteur) si fourni.
+    Si `dither` est vrai, applique un dithering Floyd-Steinberg au lieu
+    d'une quantification directe (plus lent, réduit le banding).
     Retourne (image_palettisée, palette) où palette est un tableau (N, 3) de couleurs RGB.
     """
     has_alpha = "A" in image.getbands()
@@ -79,6 +109,9 @@ def process_image(image, n_colors, size=None, sample_size=100_000):
     pixels_rgb = rgb.reshape(-1, 3)
 
     palette = compute_palette(pixels_rgb, n_colors, sample_size)
-    labels = quantize_image(pixels_rgb, palette)
+    if dither:
+        labels = dither_image(pixels_rgb, palette, width, height)
+    else:
+        labels = quantize_image(pixels_rgb, palette)
 
     return create_paletted_image(width, height, labels, palette, alpha), palette

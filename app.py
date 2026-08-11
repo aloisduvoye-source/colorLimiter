@@ -24,6 +24,7 @@ class ColorReducerApp:
         self.width_var = tk.IntVar(value=0)
         self.height_var = tk.IntVar(value=0)
         self.keep_aspect = tk.BooleanVar(value=True)
+        self.dither_var = tk.BooleanVar(value=False)
         self._aspect_ratio = 1.0
         self._syncing_dims = False
         
@@ -148,6 +149,9 @@ class ColorReducerApp:
         ttk.Checkbutton(opt_frame, text="Conserver les proportions",
                         variable=self.keep_aspect,
                         command=self.on_keep_aspect_toggle).pack(side=tk.LEFT)
+        ttk.Checkbutton(opt_frame, text="Dithering (Floyd-Steinberg)",
+                        variable=self.dither_var,
+                        command=self.on_any_change).pack(side=tk.LEFT, padx=(15, 0))
         
         # Boutons d'action
         btn_frame = ttk.Frame(main)
@@ -315,15 +319,18 @@ class ColorReducerApp:
                 n = self.n_colors.get()
                 target_w = self.width_var.get()
                 target_h = self.height_var.get()
+                dither = self.dither_var.get()
 
-                # Aperçu limité à 800px sur le plus grand côté, mais toujours
+                # Aperçu limité à 800px sur le plus grand côté (300px si dithering,
+                # car la diffusion d'erreur est bien plus lente), mais toujours
                 # aux proportions exactes de la taille cible (pas de la source)
-                max_preview = 800
+                max_preview = 300 if dither else 800
                 cap = min(1.0, max_preview / target_w, max_preview / target_h)
                 preview_size = (max(1, round(target_w * cap)),
                                  max(1, round(target_h * cap)))
 
-                result, palette = process_image(self.original_image, n, size=preview_size)
+                result, palette = process_image(
+                    self.original_image, n, size=preview_size, dither=dither)
 
                 self.root.after(0, lambda: self.set_processed_image(result, palette))
                 self.root.after(0, lambda: self.status.config(
@@ -368,8 +375,10 @@ class ColorReducerApp:
                 n = self.n_colors.get()
                 target_w = self.width_var.get()
                 target_h = self.height_var.get()
+                dither = self.dither_var.get()
 
-                result, palette = process_image(self.original_image, n, size=(target_w, target_h))
+                result, palette = process_image(
+                    self.original_image, n, size=(target_w, target_h), dither=dither)
                 result.save(path, "PNG", optimize=False)
 
                 def apply_palette():
@@ -416,6 +425,7 @@ class ColorReducerApp:
     def reset(self):
         self.n_colors.set(16)
         self.keep_aspect.set(True)
+        self.dither_var.set(False)
         if self.original_image:
             w, h = self.original_image.size
             self._aspect_ratio = w / h
