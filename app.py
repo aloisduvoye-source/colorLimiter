@@ -27,8 +27,7 @@ class ColorReducerApp:
         self._syncing_dims = False
         
         self.setup_ui()
-        self.bind_events()
-        
+
         # Forcer un premier redimensionnement après l'affichage
         self.root.update_idletasks()
         self.root.after(100, self.resize_images)
@@ -73,17 +72,24 @@ class ColorReducerApp:
         controls = ttk.LabelFrame(main, text="Paramètres", padding=10)
         controls.pack(fill=tk.X, pady=10)
         
-        # Slider couleurs
+        # Slider couleurs (+ édition manuelle via champ/flèches)
+        vcmd = (self.root.register(self._validate_digits), "%P")
+
         color_frame = ttk.Frame(controls)
         color_frame.pack(fill=tk.X, pady=2)
         ttk.Label(color_frame, text="Couleurs :").pack(side=tk.LEFT)
         ttk.Scale(color_frame, from_=2, to=256, orient=tk.HORIZONTAL,
                   variable=self.n_colors, command=self.on_any_change).pack(
                       side=tk.LEFT, fill=tk.X, expand=True, padx=10)
-        self.color_label = ttk.Label(color_frame, text="16")
-        self.color_label.pack(side=tk.RIGHT)
-        
+        self.color_spin = ttk.Spinbox(
+            color_frame, from_=2, to=256, width=6, textvariable=self.n_colors,
+            validate="key", validatecommand=vcmd, command=self.on_any_change)
+        self.color_spin.pack(side=tk.LEFT)
+        self.color_spin.bind("<Return>", self.on_any_change)
+        self.color_spin.bind("<FocusOut>", self.on_any_change)
+
         # Sliders largeur / hauteur
+
         width_frame = ttk.Frame(controls)
         width_frame.pack(fill=tk.X, pady=2)
         ttk.Label(width_frame, text="Largeur :").pack(side=tk.LEFT)
@@ -91,8 +97,14 @@ class ColorReducerApp:
                   variable=self.width_var,
                   command=lambda v: self.on_dimension_change("width")).pack(
                       side=tk.LEFT, fill=tk.X, expand=True, padx=10)
-        self.width_label = ttk.Label(width_frame, text="0 px")
-        self.width_label.pack(side=tk.RIGHT)
+        self.width_spin = ttk.Spinbox(
+            width_frame, from_=10, to=8000, width=6, textvariable=self.width_var,
+            validate="key", validatecommand=vcmd,
+            command=lambda: self.on_dimension_change("width"))
+        self.width_spin.pack(side=tk.LEFT)
+        self.width_spin.bind("<Return>", lambda e: self.on_dimension_change("width"))
+        self.width_spin.bind("<FocusOut>", lambda e: self.on_dimension_change("width"))
+        ttk.Label(width_frame, text="px").pack(side=tk.LEFT, padx=(3, 0))
 
         height_frame = ttk.Frame(controls)
         height_frame.pack(fill=tk.X, pady=2)
@@ -101,8 +113,14 @@ class ColorReducerApp:
                   variable=self.height_var,
                   command=lambda v: self.on_dimension_change("height")).pack(
                       side=tk.LEFT, fill=tk.X, expand=True, padx=10)
-        self.height_label = ttk.Label(height_frame, text="0 px")
-        self.height_label.pack(side=tk.RIGHT)
+        self.height_spin = ttk.Spinbox(
+            height_frame, from_=10, to=8000, width=6, textvariable=self.height_var,
+            validate="key", validatecommand=vcmd,
+            command=lambda: self.on_dimension_change("height"))
+        self.height_spin.pack(side=tk.LEFT)
+        self.height_spin.bind("<Return>", lambda e: self.on_dimension_change("height"))
+        self.height_spin.bind("<FocusOut>", lambda e: self.on_dimension_change("height"))
+        ttk.Label(height_frame, text="px").pack(side=tk.LEFT, padx=(3, 0))
 
         # Options
         opt_frame = ttk.Frame(controls)
@@ -124,18 +142,9 @@ class ColorReducerApp:
         self.status = ttk.Label(main, text="Prêt", foreground="gray")
         self.status.pack(fill=tk.X, pady=(5, 0))
         
-    def bind_events(self):
-        self.n_colors.trace_add("write", self.update_labels)
-        self.width_var.trace_add("write", self.update_labels)
-        self.height_var.trace_add("write", self.update_labels)
-
-    def update_labels(self, *args):
-        self.color_label.config(text=str(self.n_colors.get()))
-        try:
-            self.width_label.config(text=f"{self.width_var.get()} px")
-            self.height_label.config(text=f"{self.height_var.get()} px")
-        except tk.TclError:
-            pass
+    @staticmethod
+    def _validate_digits(value):
+        return value == "" or value.isdigit()
 
     def on_keep_aspect_toggle(self):
         """Si on réactive la conservation des proportions, réaligne la hauteur sur la largeur."""
