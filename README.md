@@ -3,6 +3,8 @@
 Application de bureau (Tkinter) pour réduire le nombre de couleurs d'une image
 par quantification K-means et exporter le résultat en PNG palettisé.
 
+![Aperçu de l'application](public/app.png)
+
 ## Installation
 
 ```bash
