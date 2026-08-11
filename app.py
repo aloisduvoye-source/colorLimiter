@@ -22,6 +22,8 @@ class ColorReducerApp:
         self.current_palette = None  # Palette (N, 3) de la dernière image traitée
         self.custom_palette = None  # Si défini, palette éditée à la main (remplace le calcul K-means)
         self.export_progress = tk.DoubleVar(value=0)
+        self._orig_display_rect = None  # (x, y, ratio) de l'image affichée dans le canvas original
+        self._preview_display_rect = None  # idem pour le canvas aperçu
 
         # Variables pour les sliders
         self.n_colors = tk.IntVar(value=16)
@@ -278,10 +280,12 @@ class ColorReducerApp:
         # Centrer dans le canvas
         self.orig_tk = ImageTk.PhotoImage(display)
         self.original_canvas.delete("all")
-        
+
         x = (width - display.width) // 2
         y = (height - display.height) // 2
         self.original_canvas.create_image(x, y, image=self.orig_tk, anchor="nw")
+        # Rectangle d'affichage (pour retrouver le pixel image cliqué, ex. pipette)
+        self._orig_display_rect = (x, y, display.width / self.original_image.width)
         
     def resize_preview(self):
         """Redimensionne l'image traitée pour remplir le canvas."""
@@ -312,10 +316,12 @@ class ColorReducerApp:
         # Centrer dans le canvas
         self.preview_tk = ImageTk.PhotoImage(display)
         self.preview_canvas.delete("all")
-        
+
         x = (width - display.width) // 2
         y = (height - display.height) // 2
         self.preview_canvas.create_image(x, y, image=self.preview_tk, anchor="nw")
+        # Rectangle d'affichage (pour retrouver le pixel image cliqué, ex. pipette)
+        self._preview_display_rect = (x, y, display.width / self.processed_image.width)
         
     def resize_images(self):
         """Redimensionne les deux images en réponse à un changement de taille."""
@@ -350,10 +356,9 @@ class ColorReducerApp:
                 target_h = self.height_var.get()
                 dither = self.dither_var.get()
 
-                # Aperçu limité à 800px sur le plus grand côté (300px si dithering,
-                # car la diffusion d'erreur est bien plus lente), mais toujours
+                # Aperçu limité à 800px sur le plus grand côté, mais toujours
                 # aux proportions exactes de la taille cible (pas de la source)
-                max_preview = 300 if dither else 800
+                max_preview = 800
                 cap = min(1.0, max_preview / target_w, max_preview / target_h)
                 preview_size = (max(1, round(target_w * cap)),
                                  max(1, round(target_h * cap)))
@@ -498,63 +503,198 @@ class ColorReducerApp:
             add_label.bind("<Button-1>", lambda e: self.add_palette_color())
 
     def pick_color_hsl(self, initial_rgb=(255, 255, 255), title="Choisir une couleur"):
-        """Dialogue modal de sélection de couleur par Teinte/Saturation/Luminosité.
+        """Dialogue modal de sélection de couleur : carré Saturation/Luminosité cliquable
+        + barre de teinte, avec sliders de précision en complément.
         Retourne un tuple (r, g, b) en 0-255, ou None si annulé."""
+        SQ = 200        # taille affichée du carré S/L
+        RES = 80        # résolution de calcul du dégradé (mise à l'échelle ensuite)
+        HUE_H = 18       # hauteur de la barre de teinte
+
         r0, g0, b0 = (v / 255.0 for v in initial_rgb)
         h0, l0, s0 = colorsys.rgb_to_hls(r0, g0, b0)
+        state = {"h": h0, "s": s0, "l": l0}
+        chosen = {"rgb": tuple(initial_rgb)}
+        images = {}  # garde une référence aux PhotoImage (sinon garbage-collectées)
+        last_rendered_hue_deg = {"value": None}
 
         dialog = tk.Toplevel(self.root)
         dialog.title(title)
         dialog.resizable(False, False)
         dialog.transient(self.root)
 
+        main = ttk.Frame(dialog, padding=15)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        sl_canvas = tk.Canvas(main, width=SQ, height=SQ, highlightthickness=1,
+                               highlightbackground="#888", cursor="crosshair")
+        sl_canvas.pack()
+        sl_cursor = {"outer": None, "inner": None}
+
+        hue_canvas = tk.Canvas(main, width=SQ, height=HUE_H, highlightthickness=1,
+                                highlightbackground="#888", cursor="sb_h_double_arrow")
+        hue_canvas.pack(pady=(6, 12))
+        hue_cursor = {"line": None}
+
+        info_frame = ttk.Frame(main)
+        info_frame.pack(fill=tk.X)
+        preview = tk.Frame(info_frame, width=40, height=40, relief="solid", borderwidth=1)
+        preview.pack(side=tk.LEFT, padx=(0, 10))
+        preview.pack_propagate(False)
+        hex_label = ttk.Label(info_frame, text="", font=("Courier", 11))
+        hex_label.pack(side=tk.LEFT)
+
+        sliders_frame = ttk.Frame(main)
+        sliders_frame.pack(fill=tk.X, pady=(12, 0))
+        sliders_frame.columnconfigure(1, weight=1)
+
         hue_var = tk.DoubleVar(value=h0 * 360)
         sat_var = tk.DoubleVar(value=s0 * 100)
         light_var = tk.DoubleVar(value=l0 * 100)
-        chosen = {"rgb": tuple(initial_rgb)}
 
-        frame = ttk.Frame(dialog, padding=15)
-        frame.pack(fill=tk.BOTH, expand=True)
-        frame.columnconfigure(2, weight=1)
+        def render_hue_bar():
+            img = Image.new("RGB", (SQ, 1))
+            for x in range(SQ):
+                r, g, b = colorsys.hls_to_rgb(x / SQ, 0.5, 1.0)
+                img.putpixel((x, 0), (int(r * 255), int(g * 255), int(b * 255)))
+            images["hue"] = ImageTk.PhotoImage(img.resize((SQ, HUE_H)))
+            hue_canvas.create_image(0, 0, anchor="nw", image=images["hue"])
 
-        preview = tk.Frame(frame, width=70, height=70, relief="solid", borderwidth=1)
-        preview.grid(row=0, column=0, rowspan=3, padx=(0, 15))
-        preview.grid_propagate(False)
+        def render_sl_square():
+            deg = round(state["h"] * 360)
+            if last_rendered_hue_deg["value"] == deg:
+                return
+            last_rendered_hue_deg["value"] = deg
+            h = state["h"]
+            img = Image.new("RGB", (RES, RES))
+            px = img.load()
+            for yi in range(RES):
+                l = 1.0 - yi / (RES - 1)
+                for xi in range(RES):
+                    s = xi / (RES - 1)
+                    r, g, b = colorsys.hls_to_rgb(h, l, s)
+                    px[xi, yi] = (int(r * 255), int(g * 255), int(b * 255))
+            images["sl"] = ImageTk.PhotoImage(img.resize((SQ, SQ), Image.NEAREST))
+            sl_canvas.delete("bg")
+            sl_canvas.create_image(0, 0, anchor="nw", image=images["sl"], tags="bg")
+            sl_canvas.tag_lower("bg")
 
-        hex_label = ttk.Label(frame, text="", font=("Courier", 10))
-        hex_label.grid(row=3, column=0, pady=(8, 0))
+        def redraw_cursors():
+            x, y = state["s"] * SQ, (1 - state["l"]) * SQ
+            r = 5
+            if sl_cursor["outer"] is None:
+                sl_cursor["outer"] = sl_canvas.create_oval(0, 0, 0, 0, outline="black", width=1)
+                sl_cursor["inner"] = sl_canvas.create_oval(0, 0, 0, 0, outline="white", width=2)
+            sl_canvas.coords(sl_cursor["outer"], x - r - 1, y - r - 1, x + r + 1, y + r + 1)
+            sl_canvas.coords(sl_cursor["inner"], x - r, y - r, x + r, y + r)
 
-        def update_preview(*_args):
-            h = hue_var.get() / 360.0
-            s = sat_var.get() / 100.0
-            l = light_var.get() / 100.0
-            r, g, b = colorsys.hls_to_rgb(h, l, s)
+            hx = state["h"] * SQ
+            if hue_cursor["line"] is None:
+                hue_cursor["line"] = hue_canvas.create_line(0, 0, 0, HUE_H, fill="white", width=3)
+            hue_canvas.coords(hue_cursor["line"], hx, 0, hx, HUE_H)
+
+        def update_from_state(regen_square=False, sync_sliders=True):
+            if regen_square:
+                render_sl_square()
+            redraw_cursors()
+            r, g, b = colorsys.hls_to_rgb(state["h"], state["l"], state["s"])
             r, g, b = int(round(r * 255)), int(round(g * 255)), int(round(b * 255))
             hex_color = f"#{r:02x}{g:02x}{b:02x}"
             preview.config(bg=hex_color)
             hex_label.config(text=hex_color)
             chosen["rgb"] = (r, g, b)
+            if sync_sliders:
+                hue_var.set(state["h"] * 360)
+                sat_var.set(state["s"] * 100)
+                light_var.set(state["l"] * 100)
+
+        def on_sl_pick(event):
+            x = min(max(event.x, 0), SQ)
+            y = min(max(event.y, 0), SQ)
+            state["s"] = x / SQ
+            state["l"] = 1 - y / SQ
+            update_from_state()
+
+        def on_hue_pick(event):
+            x = min(max(event.x, 0), SQ)
+            state["h"] = x / SQ
+            update_from_state(regen_square=True)
+
+        sl_canvas.bind("<Button-1>", on_sl_pick)
+        sl_canvas.bind("<B1-Motion>", on_sl_pick)
+        hue_canvas.bind("<Button-1>", on_hue_pick)
+        hue_canvas.bind("<B1-Motion>", on_hue_pick)
+
+        def on_slider_change(*_args):
+            state["h"] = hue_var.get() / 360.0
+            state["s"] = sat_var.get() / 100.0
+            state["l"] = light_var.get() / 100.0
+            update_from_state(regen_square=True, sync_sliders=False)
 
         def add_slider(row, label_text, var, to):
-            ttk.Label(frame, text=label_text).grid(row=row, column=1, sticky="w")
-            ttk.Scale(frame, from_=0, to=to, orient=tk.HORIZONTAL, variable=var,
-                      command=update_preview).grid(row=row, column=2, sticky="ew", padx=10)
+            ttk.Label(sliders_frame, text=label_text).grid(row=row, column=0, sticky="w")
+            ttk.Scale(sliders_frame, from_=0, to=to, orient=tk.HORIZONTAL, variable=var,
+                      command=on_slider_change).grid(row=row, column=1, sticky="ew", padx=10)
 
         add_slider(0, "Teinte", hue_var, 360)
         add_slider(1, "Saturation", sat_var, 100)
         add_slider(2, "Luminosité", light_var, 100)
-        update_preview()
 
-        btn_frame = ttk.Frame(frame)
-        btn_frame.grid(row=4, column=0, columnspan=3, pady=(15, 0), sticky="e")
+        render_hue_bar()
+        update_from_state(regen_square=True, sync_sliders=False)
+
+        def pick_pixel_from(image, rect_attr):
+            def handler(event):
+                stop_picking()
+                rect = getattr(self, rect_attr, None)
+                if rect is None or image is None:
+                    return
+                x0, y0, ratio = rect
+                if ratio <= 0:
+                    return
+                ix = int((event.x - x0) / ratio)
+                iy = int((event.y - y0) / ratio)
+                if 0 <= ix < image.width and 0 <= iy < image.height:
+                    r, g, b = image.convert("RGB").getpixel((ix, iy))
+                    state["h"], state["l"], state["s"] = colorsys.rgb_to_hls(
+                        r / 255.0, g / 255.0, b / 255.0)
+                    update_from_state(regen_square=True)
+            return handler
+
+        def stop_picking(*_args):
+            self.original_canvas.config(cursor="")
+            self.preview_canvas.config(cursor="")
+            self.original_canvas.unbind("<Button-1>")
+            self.preview_canvas.unbind("<Button-1>")
+            self.root.unbind("<Escape>")
+            dialog.grab_set()
+            dialog.lift()
+            dialog.focus_set()
+
+        def start_picking():
+            dialog.grab_release()
+            self.original_canvas.config(cursor="crosshair")
+            self.preview_canvas.config(cursor="crosshair")
+            self.original_canvas.bind(
+                "<Button-1>", pick_pixel_from(self.original_image, "_orig_display_rect"))
+            self.preview_canvas.bind(
+                "<Button-1>", pick_pixel_from(self.processed_image, "_preview_display_rect"))
+            self.root.bind("<Escape>", stop_picking)
+            self.root.lift()
+
+        btn_frame = ttk.Frame(main)
+        btn_frame.pack(fill=tk.X, pady=(15, 0))
+
+        ttk.Button(btn_frame, text="💧 Pipette", command=start_picking).pack(side=tk.LEFT)
 
         result = {"confirmed": False}
 
         def on_ok():
+            stop_picking()
             result["confirmed"] = True
             dialog.destroy()
 
         def on_cancel():
+            stop_picking()
             dialog.destroy()
 
         ttk.Button(btn_frame, text="Annuler", command=on_cancel).pack(side=tk.RIGHT, padx=5)
