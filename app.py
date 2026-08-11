@@ -100,7 +100,7 @@ class ColorReducerApp:
         color_frame.pack(fill=tk.X, pady=2)
         ttk.Label(color_frame, text="Couleurs :").pack(side=tk.LEFT)
         ttk.Scale(color_frame, from_=2, to=256, orient=tk.HORIZONTAL,
-                  variable=self.n_colors, command=self.on_any_change).pack(
+                  variable=self.n_colors, command=self.on_n_colors_change).pack(
                       side=tk.LEFT, fill=tk.X, expand=True, padx=10)
         self.color_spin = ttk.Spinbox(
             color_frame, from_=2, to=256, width=6, textvariable=self.n_colors,
@@ -187,15 +187,21 @@ class ColorReducerApp:
         if w <= 0 or h <= 0:
             return
 
-        if self.keep_aspect.get() and self._aspect_ratio:
-            self._syncing_dims = True
-            try:
+        self._syncing_dims = True
+        try:
+            # Nettoie la valeur flottante brute que ttk.Scale peut écrire dans la variable
+            if source == "width":
+                self.width_var.set(w)
+            else:
+                self.height_var.set(h)
+
+            if self.keep_aspect.get() and self._aspect_ratio:
                 if source == "width":
                     self.height_var.set(max(1, round(w / self._aspect_ratio)))
                 else:
                     self.width_var.set(max(1, round(h * self._aspect_ratio)))
-            finally:
-                self._syncing_dims = False
+        finally:
+            self._syncing_dims = False
 
         self.on_any_change()
 
@@ -304,7 +310,13 @@ class ColorReducerApp:
         if hasattr(self, "_after_id"):
             self.root.after_cancel(self._after_id)
         self._after_id = self.root.after(200, self.update_preview)
-        
+
+    def on_n_colors_change(self, value):
+        """Arrondit la valeur du slider (ttk.Scale ne s'arrête que sur des entiers via IntVar,
+        mais peut écrire une valeur flottante brute dans la variable Tk)."""
+        self.n_colors.set(round(float(value)))
+        self.on_any_change()
+
     def update_preview(self):
         """Lance le traitement en arrière-plan."""
         if not self.original_image:
