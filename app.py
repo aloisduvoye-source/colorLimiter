@@ -18,6 +18,7 @@ class ColorReducerApp:
         self.original_image = None
         self.processed_image = None  # Image traitée (PIL)
         self.current_palette = None  # Palette (N, 3) de la dernière image traitée
+        self.export_progress = tk.DoubleVar(value=0)
 
         # Variables pour les sliders
         self.n_colors = tk.IntVar(value=16)
@@ -60,7 +61,12 @@ class ColorReducerApp:
         self.palette_swatches_frame.bind(
             "<Configure>",
             lambda e: self.palette_canvas.configure(scrollregion=self.palette_canvas.bbox("all")))
-        self.palette_canvas.create_window((0, 0), window=self.palette_swatches_frame, anchor="nw")
+        self._palette_window_id = self.palette_canvas.create_window(
+            (0, 0), window=self.palette_swatches_frame, anchor="nw")
+        # La frame interne épouse toute la largeur du canvas ; le nombre de
+        # colonnes de pastilles (carrées, taille fixe) est recalculé pour
+        # que les lignes remplissent au mieux cette largeur
+        self.palette_canvas.bind("<Configure>", self._on_palette_canvas_resize)
         self.palette_canvas.configure(yscrollcommand=palette_scrollbar.set)
 
         self.palette_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -165,6 +171,9 @@ class ColorReducerApp:
         # Barre de progression / statut
         self.status = ttk.Label(main, text="Prêt", foreground="gray")
         self.status.pack(fill=tk.X, pady=(5, 0))
+
+        self.export_progress_bar = ttk.Progressbar(
+            main, variable=self.export_progress, maximum=100, mode="determinate")
 
     @staticmethod
     def _validate_digits(value):
@@ -381,7 +390,9 @@ class ColorReducerApp:
             
         self.status.config(text="Export en cours...", foreground="orange")
         self.root.config(cursor="watch")
-        
+        self.export_progress.set(0)
+        self.export_progress_bar.pack(fill=tk.X, pady=(5, 0))
+
         def task():
             try:
                 n = self.n_colors.get()
@@ -389,8 +400,18 @@ class ColorReducerApp:
                 target_h = self.height_var.get()
                 dither = self.dither_var.get()
 
+                last_reported = -1
+
+                def on_progress(fraction):
+                    nonlocal last_reported
+                    pct = fraction * 100
+                    if pct - last_reported >= 1 or pct >= 100:
+                        last_reported = pct
+                        self.root.after(0, lambda p=pct: self.export_progress.set(p))
+
                 result, palette = process_image(
-                    self.original_image, n, size=(target_w, target_h), dither=dither)
+                    self.original_image, n, size=(target_w, target_h), dither=dither,
+                    progress_callback=on_progress)
                 result.save(path, "PNG", optimize=False)
 
                 def apply_palette():
@@ -409,30 +430,47 @@ class ColorReducerApp:
                     text="Erreur", foreground="red"))
             finally:
                 self.root.after(0, lambda: self.root.config(cursor=""))
-                
+                self.root.after(0, self.export_progress_bar.pack_forget)
+
         threading.Thread(target=task, daemon=True).start()
 
+    def _on_palette_canvas_resize(self, event):
+        """Adapte la largeur de la frame interne et recalcule le nombre de
+        colonnes de pastilles (débounce pour éviter de reconstruire à chaque pixel)."""
+        self.palette_canvas.itemconfig(self._palette_window_id, width=event.width)
+        if hasattr(self, "_palette_resize_after_id"):
+            self.root.after_cancel(self._palette_resize_after_id)
+        self._palette_resize_after_id = self.root.after(100, self.refresh_palette_display)
+
     def refresh_palette_display(self):
-        """Reconstruit les pastilles de couleurs à partir de self.current_palette."""
+        """Reconstruit les pastilles de couleurs (carrées) à partir de self.current_palette,
+        avec un nombre de colonnes calculé pour remplir la largeur disponible."""
         for widget in self.palette_swatches_frame.winfo_children():
             widget.destroy()
 
         if self.current_palette is None or len(self.current_palette) == 0:
             self.palette_frame.config(text="Palette utilisée")
             ttk.Label(self.palette_swatches_frame, text="Aucune palette disponible pour le moment.",
-                      foreground="gray").grid(row=0, column=0, padx=5, pady=5)
+                      foreground="gray").grid(row=0, column=0, padx=5, pady=5, sticky="w")
             return
 
         self.palette_frame.config(
             text=f"Palette utilisée ({len(self.current_palette)} couleurs)")
-        cols = 16
+
+        swatch_size = 28
+        pad = 2
+        canvas_width = self.palette_canvas.winfo_width()
+        if canvas_width <= 1:
+            canvas_width = 400
+        cols = max(1, canvas_width // (swatch_size + 2 * pad))
+
         for i, color in enumerate(self.current_palette):
             r, g, b = int(color[0]), int(color[1]), int(color[2])
             hex_color = f"#{r:02x}{g:02x}{b:02x}"
-            cell = ttk.Frame(self.palette_swatches_frame, padding=3)
-            cell.grid(row=i // cols, column=i % cols)
-            tk.Frame(cell, bg=hex_color, width=28, height=28,
-                     relief="solid", borderwidth=1).pack()
+            tk.Frame(self.palette_swatches_frame, bg=hex_color,
+                     width=swatch_size, height=swatch_size,
+                     relief="solid", borderwidth=1).grid(
+                         row=i // cols, column=i % cols, padx=pad, pady=pad, sticky="w")
 
     def reset(self):
         self.n_colors.set(16)

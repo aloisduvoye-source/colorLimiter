@@ -1,3 +1,4 @@
+import colorsys
 import numpy as np
 from PIL import Image
 from sklearn.cluster import KMeans
@@ -24,26 +25,40 @@ def compute_palette(pixels_rgb, n_colors, sample_size=100_000):
     palette = np.rint(kmeans.cluster_centers_).clip(0, 255).astype(np.uint8)
     return palette
 
-def quantize_image(pixels_rgb, palette, block_size=1_000_000):
+def sort_palette(palette):
+    """Trie la palette par teinte puis par luminosité (HSL), pour un affichage lisible."""
+    def key(color):
+        h, l, _s = colorsys.rgb_to_hls(color[0] / 255.0, color[1] / 255.0, color[2] / 255.0)
+        return (h, l)
+
+    order = sorted(range(len(palette)), key=lambda i: key(palette[i]))
+    return palette[order]
+
+def quantize_image(pixels_rgb, palette, block_size=1_000_000, progress_callback=None):
     """Quantifie chaque pixel vers la couleur la plus proche dans la palette."""
     total = len(pixels_rgb)
     labels = np.empty(total, dtype=np.uint8)
-    
+
     for start in range(0, total, block_size):
         end = min(start + block_size, total)
         block = pixels_rgb[start:end]
-        distances = np.sum((block[:, None, :].astype(np.float32) - 
+        distances = np.sum((block[:, None, :].astype(np.float32) -
                            palette[None, :, :].astype(np.float32)) ** 2, axis=2)
         labels[start:end] = np.argmin(distances, axis=1)
-    
+        if progress_callback:
+            progress_callback(end / total)
+
     return labels
 
-def dither_image(pixels_rgb, palette, width, height):
+def dither_image(pixels_rgb, palette, width, height, progress_callback=None):
     """Quantifie chaque pixel vers la couleur la plus proche dans la palette,
     en diffusant l'erreur de quantification (Floyd-Steinberg)."""
     tree = cKDTree(palette.astype(np.float32))
     work = pixels_rgb.astype(np.float32).reshape(height, width, 3)
     labels = np.empty((height, width), dtype=np.uint8)
+
+    # Reporter la progression au maximum ~200 fois pour ne pas ralentir la boucle
+    report_every = max(1, height // 200)
 
     for y in range(height):
         row = work[y]
@@ -62,6 +77,9 @@ def dither_image(pixels_rgb, palette, width, height):
                 next_row[x] += error * (5 / 16)
                 if x + 1 < width:
                     next_row[x + 1] += error * (1 / 16)
+
+        if progress_callback and (y % report_every == 0 or y == height - 1):
+            progress_callback((y + 1) / height)
 
     return labels.reshape(-1)
 
@@ -86,20 +104,27 @@ def create_paletted_image(width, height, labels, palette, alpha=None):
     
     return img
 
-def process_image(image, n_colors, size=None, sample_size=100_000, dither=False):
+def process_image(image, n_colors, size=None, sample_size=100_000, dither=False,
+                   progress_callback=None):
     """
     Traite une image PIL complète.
     Redimensionne vers `size` (largeur, hauteur) si fourni.
     Si `dither` est vrai, applique un dithering Floyd-Steinberg au lieu
     d'une quantification directe (plus lent, réduit le banding).
+    `progress_callback(fraction)` est appelé avec une valeur entre 0.0 et 1.0.
     Retourne (image_palettisée, palette) où palette est un tableau (N, 3) de couleurs RGB.
     """
+    def report(fraction):
+        if progress_callback:
+            progress_callback(fraction)
+
     has_alpha = "A" in image.getbands()
     img = image.convert("RGBA") if has_alpha else image.convert("RGB")
 
     # Redimensionnement si nécessaire
     if size is not None and size != img.size:
         img = img.resize(size, Image.Resampling.LANCZOS)
+    report(0.05)
 
     width, height = img.size
     pixels = np.asarray(img)
@@ -109,9 +134,16 @@ def process_image(image, n_colors, size=None, sample_size=100_000, dither=False)
     pixels_rgb = rgb.reshape(-1, 3)
 
     palette = compute_palette(pixels_rgb, n_colors, sample_size)
-    if dither:
-        labels = dither_image(pixels_rgb, palette, width, height)
-    else:
-        labels = quantize_image(pixels_rgb, palette)
+    palette = sort_palette(palette)
+    report(0.3)
 
-    return create_paletted_image(width, height, labels, palette, alpha), palette
+    step_progress = lambda f: report(0.3 + f * 0.65)
+    if dither:
+        labels = dither_image(pixels_rgb, palette, width, height,
+                               progress_callback=step_progress)
+    else:
+        labels = quantize_image(pixels_rgb, palette, progress_callback=step_progress)
+
+    result = create_paletted_image(width, height, labels, palette, alpha)
+    report(1.0)
+    return result, palette
