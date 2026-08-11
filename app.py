@@ -2,6 +2,8 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk
+import numpy as np
+import colorsys
 import threading
 import os
 
@@ -18,6 +20,7 @@ class ColorReducerApp:
         self.original_image = None
         self.processed_image = None  # Image traitée (PIL)
         self.current_palette = None  # Palette (N, 3) de la dernière image traitée
+        self.custom_palette = None  # Si défini, palette éditée à la main (remplace le calcul K-means)
         self.export_progress = tk.DoubleVar(value=0)
 
         # Variables pour les sliders
@@ -53,6 +56,9 @@ class ColorReducerApp:
         # Panneau palette (intégré, toujours affiché, en haut de l'écran)
         self.palette_frame = ttk.LabelFrame(main, text="Palette utilisée", padding=5)
         self.palette_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(self.palette_frame,
+                  text="Clic gauche : modifier une couleur · Clic droit : la supprimer · + : en ajouter une",
+                  foreground="gray", font=("TkDefaultFont", 8)).pack(anchor="w", pady=(0, 3))
         self.palette_canvas = tk.Canvas(self.palette_frame, height=100, highlightthickness=0)
         palette_scrollbar = ttk.Scrollbar(
             self.palette_frame, orient="vertical", command=self.palette_canvas.yview)
@@ -165,6 +171,8 @@ class ColorReducerApp:
         
         ttk.Button(btn_frame, text="🔄 Réinitialiser",
                    command=self.reset).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="🎲 Générer palette auto",
+                   command=self.generate_auto_palette).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="💾 Exporter en PNG",
                    command=self.export).pack(side=tk.RIGHT, padx=5)
 
@@ -351,7 +359,8 @@ class ColorReducerApp:
                                  max(1, round(target_h * cap)))
 
                 result, palette = process_image(
-                    self.original_image, n, size=preview_size, dither=dither)
+                    self.original_image, n, size=preview_size, dither=dither,
+                    palette=self.custom_palette)
 
                 self.root.after(0, lambda: self.set_processed_image(result, palette))
                 self.root.after(0, lambda: self.status.config(
@@ -411,7 +420,7 @@ class ColorReducerApp:
 
                 result, palette = process_image(
                     self.original_image, n, size=(target_w, target_h), dither=dither,
-                    progress_callback=on_progress)
+                    progress_callback=on_progress, palette=self.custom_palette)
                 result.save(path, "PNG", optimize=False)
 
                 def apply_palette():
@@ -444,18 +453,22 @@ class ColorReducerApp:
 
     def refresh_palette_display(self):
         """Reconstruit les pastilles de couleurs (carrées) à partir de self.current_palette,
-        avec un nombre de colonnes calculé pour remplir la largeur disponible."""
+        avec un nombre de colonnes calculé pour remplir la largeur disponible.
+        Chaque pastille est cliquable (édition/suppression) ; une tuile "+" permet d'ajouter
+        une couleur tant qu'une image est chargée."""
         for widget in self.palette_swatches_frame.winfo_children():
             widget.destroy()
 
-        if self.current_palette is None or len(self.current_palette) == 0:
+        n = len(self.current_palette) if self.current_palette is not None else 0
+
+        if n == 0 and not self.original_image:
             self.palette_frame.config(text="Palette utilisée")
             ttk.Label(self.palette_swatches_frame, text="Aucune palette disponible pour le moment.",
                       foreground="gray").grid(row=0, column=0, padx=5, pady=5, sticky="w")
             return
 
         self.palette_frame.config(
-            text=f"Palette utilisée ({len(self.current_palette)} couleurs)")
+            text=f"Palette utilisée ({n} couleurs)" if n else "Palette utilisée")
 
         swatch_size = 28
         pad = 2
@@ -464,13 +477,151 @@ class ColorReducerApp:
             canvas_width = 400
         cols = max(1, canvas_width // (swatch_size + 2 * pad))
 
-        for i, color in enumerate(self.current_palette):
-            r, g, b = int(color[0]), int(color[1]), int(color[2])
+        for i in range(n):
+            r, g, b = (int(v) for v in self.current_palette[i][:3])
             hex_color = f"#{r:02x}{g:02x}{b:02x}"
-            tk.Frame(self.palette_swatches_frame, bg=hex_color,
-                     width=swatch_size, height=swatch_size,
-                     relief="solid", borderwidth=1).grid(
-                         row=i // cols, column=i % cols, padx=pad, pady=pad, sticky="w")
+            swatch = tk.Frame(self.palette_swatches_frame, bg=hex_color,
+                               width=swatch_size, height=swatch_size,
+                               relief="solid", borderwidth=1, cursor="hand2")
+            swatch.grid(row=i // cols, column=i % cols, padx=pad, pady=pad, sticky="w")
+            swatch.bind("<Button-1>", lambda e, idx=i: self.edit_palette_color(idx))
+            swatch.bind("<Button-3>", lambda e, idx=i: self.delete_palette_color(idx))
+
+        if self.original_image:
+            add_tile = tk.Frame(self.palette_swatches_frame, width=swatch_size, height=swatch_size,
+                                 relief="ridge", borderwidth=1, cursor="hand2")
+            add_tile.grid_propagate(False)
+            add_tile.grid(row=n // cols, column=n % cols, padx=pad, pady=pad, sticky="w")
+            add_label = tk.Label(add_tile, text="+", fg="gray", font=("TkDefaultFont", 14, "bold"))
+            add_label.pack(expand=True, fill="both")
+            add_tile.bind("<Button-1>", lambda e: self.add_palette_color())
+            add_label.bind("<Button-1>", lambda e: self.add_palette_color())
+
+    def pick_color_hsl(self, initial_rgb=(255, 255, 255), title="Choisir une couleur"):
+        """Dialogue modal de sélection de couleur par Teinte/Saturation/Luminosité.
+        Retourne un tuple (r, g, b) en 0-255, ou None si annulé."""
+        r0, g0, b0 = (v / 255.0 for v in initial_rgb)
+        h0, l0, s0 = colorsys.rgb_to_hls(r0, g0, b0)
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+
+        hue_var = tk.DoubleVar(value=h0 * 360)
+        sat_var = tk.DoubleVar(value=s0 * 100)
+        light_var = tk.DoubleVar(value=l0 * 100)
+        chosen = {"rgb": tuple(initial_rgb)}
+
+        frame = ttk.Frame(dialog, padding=15)
+        frame.pack(fill=tk.BOTH, expand=True)
+        frame.columnconfigure(2, weight=1)
+
+        preview = tk.Frame(frame, width=70, height=70, relief="solid", borderwidth=1)
+        preview.grid(row=0, column=0, rowspan=3, padx=(0, 15))
+        preview.grid_propagate(False)
+
+        hex_label = ttk.Label(frame, text="", font=("Courier", 10))
+        hex_label.grid(row=3, column=0, pady=(8, 0))
+
+        def update_preview(*_args):
+            h = hue_var.get() / 360.0
+            s = sat_var.get() / 100.0
+            l = light_var.get() / 100.0
+            r, g, b = colorsys.hls_to_rgb(h, l, s)
+            r, g, b = int(round(r * 255)), int(round(g * 255)), int(round(b * 255))
+            hex_color = f"#{r:02x}{g:02x}{b:02x}"
+            preview.config(bg=hex_color)
+            hex_label.config(text=hex_color)
+            chosen["rgb"] = (r, g, b)
+
+        def add_slider(row, label_text, var, to):
+            ttk.Label(frame, text=label_text).grid(row=row, column=1, sticky="w")
+            ttk.Scale(frame, from_=0, to=to, orient=tk.HORIZONTAL, variable=var,
+                      command=update_preview).grid(row=row, column=2, sticky="ew", padx=10)
+
+        add_slider(0, "Teinte", hue_var, 360)
+        add_slider(1, "Saturation", sat_var, 100)
+        add_slider(2, "Luminosité", light_var, 100)
+        update_preview()
+
+        btn_frame = ttk.Frame(frame)
+        btn_frame.grid(row=4, column=0, columnspan=3, pady=(15, 0), sticky="e")
+
+        result = {"confirmed": False}
+
+        def on_ok():
+            result["confirmed"] = True
+            dialog.destroy()
+
+        def on_cancel():
+            dialog.destroy()
+
+        ttk.Button(btn_frame, text="Annuler", command=on_cancel).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btn_frame, text="OK", command=on_ok).pack(side=tk.RIGHT)
+        dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+
+        dialog.update_idletasks()
+        dialog.grab_set()
+        dialog.wait_window()
+
+        return chosen["rgb"] if result["confirmed"] else None
+
+    def _ensure_custom_palette(self):
+        """Fige la palette actuelle en palette 'personnalisée' si ce n'est pas déjà le cas."""
+        if self.custom_palette is None:
+            base = self.current_palette if self.current_palette is not None \
+                else np.array([[255, 255, 255]], dtype=np.uint8)
+            self.custom_palette = np.array(base, dtype=np.uint8).copy()
+
+    def edit_palette_color(self, index):
+        """Ouvre le sélecteur de couleur système pour modifier une couleur de la palette."""
+        if self.current_palette is None or index >= len(self.current_palette):
+            return
+        r, g, b = (int(v) for v in self.current_palette[index][:3])
+        rgb = self.pick_color_hsl(initial_rgb=(r, g, b), title="Modifier la couleur")
+        if rgb is None:
+            return
+        self._ensure_custom_palette()
+        self.custom_palette[index] = [int(round(v)) for v in rgb]
+        self.current_palette = self.custom_palette
+        self.refresh_palette_display()
+        self.on_any_change()
+
+    def delete_palette_color(self, index):
+        """Supprime une couleur de la palette (il doit en rester au moins une)."""
+        if self.current_palette is None or index >= len(self.current_palette):
+            return
+        if len(self.current_palette) <= 1:
+            messagebox.showwarning("Palette", "Il doit rester au moins une couleur dans la palette.")
+            return
+        self._ensure_custom_palette()
+        self.custom_palette = np.delete(self.custom_palette, index, axis=0)
+        self.current_palette = self.custom_palette
+        self.refresh_palette_display()
+        self.on_any_change()
+
+    def add_palette_color(self):
+        """Ajoute une nouvelle couleur choisie par l'utilisateur à la palette."""
+        if not self.original_image:
+            return
+        rgb = self.pick_color_hsl(initial_rgb=(255, 255, 255), title="Ajouter une couleur")
+        if rgb is None:
+            return
+        self._ensure_custom_palette()
+        new_row = np.array([[int(round(v)) for v in rgb]], dtype=np.uint8)
+        self.custom_palette = np.vstack([self.custom_palette, new_row])
+        self.current_palette = self.custom_palette
+        self.refresh_palette_display()
+        self.on_any_change()
+
+    def generate_auto_palette(self):
+        """Abandonne la palette personnalisée et revient au calcul automatique (K-means)."""
+        if not self.original_image:
+            messagebox.showwarning("Avertissement", "Veuillez d'abord importer une image.")
+            return
+        self.custom_palette = None
+        self.on_any_change()
 
     def reset(self):
         self.n_colors.set(16)
@@ -485,6 +636,7 @@ class ColorReducerApp:
             self._syncing_dims = False
         self.processed_image = None
         self.current_palette = None
+        self.custom_palette = None
         self.resize_preview()
         self.refresh_palette_display()
         self.update_preview()

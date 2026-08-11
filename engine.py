@@ -105,12 +105,14 @@ def create_paletted_image(width, height, labels, palette, alpha=None):
     return img
 
 def process_image(image, n_colors, size=None, sample_size=100_000, dither=False,
-                   progress_callback=None):
+                   progress_callback=None, palette=None):
     """
     Traite une image PIL complète.
     Redimensionne vers `size` (largeur, hauteur) si fourni.
     Si `dither` est vrai, applique un dithering Floyd-Steinberg au lieu
     d'une quantification directe (plus lent, réduit le banding).
+    Si `palette` est fournie (tableau (N, 3) uint8), elle est utilisée telle quelle
+    (sans recalcul K-means ni tri) — utile pour une palette éditée manuellement.
     `progress_callback(fraction)` est appelé avec une valeur entre 0.0 et 1.0.
     Retourne (image_palettisée, palette) où palette est un tableau (N, 3) de couleurs RGB.
     """
@@ -133,8 +135,11 @@ def process_image(image, n_colors, size=None, sample_size=100_000, dither=False,
     alpha = pixels[:, :, 3] if has_alpha else None
     pixels_rgb = rgb.reshape(-1, 3)
 
-    palette = compute_palette(pixels_rgb, n_colors, sample_size)
-    palette = sort_palette(palette)
+    if palette is None:
+        palette = compute_palette(pixels_rgb, n_colors, sample_size)
+        palette = sort_palette(palette)
+    else:
+        palette = np.asarray(palette, dtype=np.uint8)
     report(0.3)
 
     step_progress = lambda f: report(0.3 + f * 0.65)
