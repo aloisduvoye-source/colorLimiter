@@ -58,20 +58,18 @@ def create_paletted_image(width, height, labels, palette, alpha=None):
     
     return img
 
-def process_image(image, n_colors, scale=1.0, sample_size=100_000):
+def process_image(image, n_colors, size=None, sample_size=100_000):
     """
     Traite une image PIL complète.
-    Retourne l'image palettisée redimensionnée si scale != 1.0.
+    Redimensionne vers `size` (largeur, hauteur) si fourni.
     """
     has_alpha = "A" in image.getbands()
     img = image.convert("RGBA") if has_alpha else image.convert("RGB")
-    
+
     # Redimensionnement si nécessaire
-    if scale != 1.0:
-        w, h = img.size
-        new_w, new_h = int(w * scale), int(h * scale)
-        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    
+    if size is not None and size != img.size:
+        img = img.resize(size, Image.Resampling.LANCZOS)
+
     width, height = img.size
     pixels = np.asarray(img)
     

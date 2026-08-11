@@ -20,8 +20,11 @@ class ColorReducerApp:
         
         # Variables pour les sliders
         self.n_colors = tk.IntVar(value=16)
-        self.scale_percent = tk.IntVar(value=100)
+        self.width_var = tk.IntVar(value=0)
+        self.height_var = tk.IntVar(value=0)
         self.keep_aspect = tk.BooleanVar(value=True)
+        self._aspect_ratio = 1.0
+        self._syncing_dims = False
         
         self.setup_ui()
         self.bind_events()
@@ -80,21 +83,33 @@ class ColorReducerApp:
         self.color_label = ttk.Label(color_frame, text="16")
         self.color_label.pack(side=tk.RIGHT)
         
-        # Slider échelle
-        scale_frame = ttk.Frame(controls)
-        scale_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(scale_frame, text="Échelle :").pack(side=tk.LEFT)
-        ttk.Scale(scale_frame, from_=10, to=200, orient=tk.HORIZONTAL,
-                  variable=self.scale_percent, command=self.on_any_change).pack(
+        # Sliders largeur / hauteur
+        width_frame = ttk.Frame(controls)
+        width_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(width_frame, text="Largeur :").pack(side=tk.LEFT)
+        ttk.Scale(width_frame, from_=10, to=8000, orient=tk.HORIZONTAL,
+                  variable=self.width_var,
+                  command=lambda v: self.on_dimension_change("width")).pack(
                       side=tk.LEFT, fill=tk.X, expand=True, padx=10)
-        self.scale_label = ttk.Label(scale_frame, text="100 %")
-        self.scale_label.pack(side=tk.RIGHT)
-        
+        self.width_label = ttk.Label(width_frame, text="0 px")
+        self.width_label.pack(side=tk.RIGHT)
+
+        height_frame = ttk.Frame(controls)
+        height_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(height_frame, text="Hauteur :").pack(side=tk.LEFT)
+        ttk.Scale(height_frame, from_=10, to=8000, orient=tk.HORIZONTAL,
+                  variable=self.height_var,
+                  command=lambda v: self.on_dimension_change("height")).pack(
+                      side=tk.LEFT, fill=tk.X, expand=True, padx=10)
+        self.height_label = ttk.Label(height_frame, text="0 px")
+        self.height_label.pack(side=tk.RIGHT)
+
         # Options
         opt_frame = ttk.Frame(controls)
         opt_frame.pack(fill=tk.X, pady=5)
         ttk.Checkbutton(opt_frame, text="Conserver les proportions",
-                        variable=self.keep_aspect).pack(side=tk.LEFT)
+                        variable=self.keep_aspect,
+                        command=self.on_keep_aspect_toggle).pack(side=tk.LEFT)
         
         # Boutons d'action
         btn_frame = ttk.Frame(main)
@@ -111,12 +126,46 @@ class ColorReducerApp:
         
     def bind_events(self):
         self.n_colors.trace_add("write", self.update_labels)
-        self.scale_percent.trace_add("write", self.update_labels)
-        
+        self.width_var.trace_add("write", self.update_labels)
+        self.height_var.trace_add("write", self.update_labels)
+
     def update_labels(self, *args):
         self.color_label.config(text=str(self.n_colors.get()))
-        self.scale_label.config(text=f"{self.scale_percent.get()} %")
-        
+        try:
+            self.width_label.config(text=f"{self.width_var.get()} px")
+            self.height_label.config(text=f"{self.height_var.get()} px")
+        except tk.TclError:
+            pass
+
+    def on_keep_aspect_toggle(self):
+        """Si on réactive la conservation des proportions, réaligne la hauteur sur la largeur."""
+        if self.keep_aspect.get() and self._aspect_ratio:
+            self.on_dimension_change("width")
+
+    def on_dimension_change(self, source):
+        """Synchronise largeur/hauteur si 'Conserver les proportions' est actif, puis relance l'aperçu."""
+        if self._syncing_dims or not self.original_image:
+            return
+        try:
+            w = self.width_var.get()
+            h = self.height_var.get()
+        except tk.TclError:
+            return
+        if w <= 0 or h <= 0:
+            return
+
+        if self.keep_aspect.get() and self._aspect_ratio:
+            self._syncing_dims = True
+            try:
+                if source == "width":
+                    self.height_var.set(max(1, round(w / self._aspect_ratio)))
+                else:
+                    self.width_var.set(max(1, round(h * self._aspect_ratio)))
+            finally:
+                self._syncing_dims = False
+
+        self.on_any_change()
+
     def load_image(self):
         path = filedialog.askopenfilename(
             title="Choisir une image",
@@ -131,6 +180,14 @@ class ColorReducerApp:
         try:
             self.original_image = Image.open(path)
             self.processed_image = None
+
+            w, h = self.original_image.size
+            self._aspect_ratio = w / h
+            self._syncing_dims = True
+            self.width_var.set(w)
+            self.height_var.set(h)
+            self._syncing_dims = False
+
             self.resize_original()
             self.update_preview()
             self.status.config(text="Image chargée", foreground="green")
@@ -227,21 +284,18 @@ class ColorReducerApp:
         def task():
             try:
                 n = self.n_colors.get()
-                scale = self.scale_percent.get() / 100.0
-                
-                # On travaille sur une copie pour l'aperçu
-                # On limite la taille pour l'aperçu (max 800px)
-                preview = self.original_image.copy()
-                preview.thumbnail((800, 800), Image.Resampling.LANCZOS)
-                
-                # Applique le scale sur l'aperçu
-                if scale != 1.0:
-                    w, h = preview.size
-                    preview = preview.resize((int(w*scale), int(h*scale)), 
-                                             Image.Resampling.LANCZOS)
-                
-                result = process_image(preview, n, scale=1.0)  # déjà redimensionné
-                
+                target_w = self.width_var.get()
+                target_h = self.height_var.get()
+
+                # Aperçu limité à 800px sur le plus grand côté, mais toujours
+                # aux proportions exactes de la taille cible (pas de la source)
+                max_preview = 800
+                cap = min(1.0, max_preview / target_w, max_preview / target_h)
+                preview_size = (max(1, round(target_w * cap)),
+                                 max(1, round(target_h * cap)))
+
+                result = process_image(self.original_image, n, size=preview_size)
+
                 self.root.after(0, lambda: self.set_processed_image(result))
                 self.root.after(0, lambda: self.status.config(
                     text=f"Aperçu généré avec {n} couleurs", foreground="green"))
@@ -280,9 +334,10 @@ class ColorReducerApp:
         def task():
             try:
                 n = self.n_colors.get()
-                scale = self.scale_percent.get() / 100.0
-                
-                result = process_image(self.original_image, n, scale=scale)
+                target_w = self.width_var.get()
+                target_h = self.height_var.get()
+
+                result = process_image(self.original_image, n, size=(target_w, target_h))
                 result.save(path, "PNG", optimize=False)
                 
                 self.root.after(0, lambda: messagebox.showinfo(
@@ -301,8 +356,14 @@ class ColorReducerApp:
         
     def reset(self):
         self.n_colors.set(16)
-        self.scale_percent.set(100)
         self.keep_aspect.set(True)
+        if self.original_image:
+            w, h = self.original_image.size
+            self._aspect_ratio = w / h
+            self._syncing_dims = True
+            self.width_var.set(w)
+            self.height_var.set(h)
+            self._syncing_dims = False
         self.processed_image = None
         self.resize_preview()
         self.update_preview()
