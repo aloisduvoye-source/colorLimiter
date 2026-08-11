@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageDraw, ImageChops
 import numpy as np
 import colorsys
 import threading
@@ -15,7 +15,8 @@ class ColorReducerApp:
         root.title("Réducteur de couleurs")
         root.geometry("1000x700")
         root.minsize(800, 600)
-        
+        self._set_app_icon()
+
         self.input_path = None
         self.original_image = None
         self.processed_image = None  # Image traitée (PIL)
@@ -39,7 +40,42 @@ class ColorReducerApp:
         # Forcer un premier redimensionnement après l'affichage
         self.root.update_idletasks()
         self.root.after(100, self.resize_images)
-        
+
+    @staticmethod
+    def _round_corners(image, radius_ratio=0.22, supersample=4):
+        """Applique des coins arrondis anti-aliasés à une image carrée (calcul en
+        surrésolution puis réduction, pour un contour lisse plutôt que crénelé)."""
+        image = image.convert("RGBA")
+        w, h = image.size
+        big = image.resize((w * supersample, h * supersample), Image.LANCZOS)
+
+        mask = Image.new("L", big.size, 0)
+        radius = int(min(big.size) * radius_ratio)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            [0, 0, big.size[0] - 1, big.size[1] - 1], radius=radius, fill=255)
+
+        # Intersecte avec la transparence déjà présente dans l'image source
+        combined_alpha = ImageChops.darker(big.split()[3], mask)
+        big.putalpha(combined_alpha)
+
+        return big.resize((w, h), Image.LANCZOS)
+
+    def _set_app_icon(self):
+        """Charge l'icône depuis public/icon.png (si présente), lui applique des coins
+        arrondis et la décline en plusieurs tailles standard pour un rendu net dans
+        la barre des tâches / le dock, quelle que soit la taille utilisée par l'OS."""
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "public", "icon.png")
+        if not os.path.isfile(icon_path):
+            return
+        try:
+            source = self._round_corners(Image.open(icon_path))
+            sizes = [64, 48, 32, 16]
+            self._icon_images = [
+                ImageTk.PhotoImage(source.resize((s, s), Image.LANCZOS)) for s in sizes]
+            self.root.iconphoto(True, *self._icon_images)
+        except Exception:
+            pass
+
     def setup_ui(self):
         # Frame principal
         main = ttk.Frame(self.root, padding=10)
