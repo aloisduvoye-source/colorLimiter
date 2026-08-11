@@ -17,7 +17,8 @@ class ColorReducerApp:
         self.input_path = None
         self.original_image = None
         self.processed_image = None  # Image traitée (PIL)
-        
+        self.current_palette = None  # Palette (N, 3) de la dernière image traitée
+
         # Variables pour les sliders
         self.n_colors = tk.IntVar(value=16)
         self.width_var = tk.IntVar(value=0)
@@ -133,15 +134,36 @@ class ColorReducerApp:
         btn_frame = ttk.Frame(main)
         btn_frame.pack(fill=tk.X, pady=5)
         
-        ttk.Button(btn_frame, text="🔄 Réinitialiser", 
+        ttk.Button(btn_frame, text="🔄 Réinitialiser",
                    command=self.reset).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="💾 Exporter en PNG", 
+        self.palette_toggle_btn = ttk.Button(
+            btn_frame, text="🎨 Afficher la palette", command=self.toggle_palette)
+        self.palette_toggle_btn.pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="💾 Exporter en PNG",
                    command=self.export).pack(side=tk.RIGHT, padx=5)
-        
+
+        # Panneau palette (intégré, masqué par défaut)
+        self.palette_frame = ttk.LabelFrame(main, text="Palette utilisée", padding=5)
+        self.palette_canvas = tk.Canvas(self.palette_frame, height=100, highlightthickness=0)
+        palette_scrollbar = ttk.Scrollbar(
+            self.palette_frame, orient="vertical", command=self.palette_canvas.yview)
+        self.palette_swatches_frame = ttk.Frame(self.palette_canvas)
+
+        self.palette_swatches_frame.bind(
+            "<Configure>",
+            lambda e: self.palette_canvas.configure(scrollregion=self.palette_canvas.bbox("all")))
+        self.palette_canvas.create_window((0, 0), window=self.palette_swatches_frame, anchor="nw")
+        self.palette_canvas.configure(yscrollcommand=palette_scrollbar.set)
+
+        self.palette_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        palette_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.refresh_palette_display()
+
         # Barre de progression / statut
         self.status = ttk.Label(main, text="Prêt", foreground="gray")
         self.status.pack(fill=tk.X, pady=(5, 0))
-        
+
     @staticmethod
     def _validate_digits(value):
         return value == "" or value.isdigit()
@@ -303,9 +325,9 @@ class ColorReducerApp:
                 preview_size = (max(1, round(target_w * cap)),
                                  max(1, round(target_h * cap)))
 
-                result = process_image(self.original_image, n, size=preview_size)
+                result, palette = process_image(self.original_image, n, size=preview_size)
 
-                self.root.after(0, lambda: self.set_processed_image(result))
+                self.root.after(0, lambda: self.set_processed_image(result, palette))
                 self.root.after(0, lambda: self.status.config(
                     text=f"Aperçu généré avec {n} couleurs", foreground="green"))
             except Exception as e:
@@ -318,11 +340,14 @@ class ColorReducerApp:
                 
         threading.Thread(target=task, daemon=True).start()
         
-    def set_processed_image(self, pil_image):
+    def set_processed_image(self, pil_image, palette):
         """Définit l'image traitée et la redimensionne."""
         self.processed_image = pil_image
+        self.current_palette = palette
         self.resize_preview()
-        
+        self.refresh_palette_display()
+
+
     def export(self):
         """Exporte l'image finale en PNG."""
         if not self.original_image:
@@ -346,9 +371,14 @@ class ColorReducerApp:
                 target_w = self.width_var.get()
                 target_h = self.height_var.get()
 
-                result = process_image(self.original_image, n, size=(target_w, target_h))
+                result, palette = process_image(self.original_image, n, size=(target_w, target_h))
                 result.save(path, "PNG", optimize=False)
-                
+
+                def apply_palette():
+                    self.current_palette = palette
+                    self.refresh_palette_display()
+                self.root.after(0, apply_palette)
+
                 self.root.after(0, lambda: messagebox.showinfo(
                     "Succès", f"Image exportée : {path}"))
                 self.root.after(0, lambda: self.status.config(
@@ -362,7 +392,38 @@ class ColorReducerApp:
                 self.root.after(0, lambda: self.root.config(cursor=""))
                 
         threading.Thread(target=task, daemon=True).start()
-        
+
+    def toggle_palette(self):
+        """Affiche ou masque le panneau de palette intégré."""
+        if self.palette_frame.winfo_ismapped():
+            self.palette_frame.pack_forget()
+            self.palette_toggle_btn.config(text="🎨 Afficher la palette")
+        else:
+            self.palette_frame.pack(fill=tk.X, pady=5, before=self.status)
+            self.palette_toggle_btn.config(text="🎨 Masquer la palette")
+
+    def refresh_palette_display(self):
+        """Reconstruit les pastilles de couleurs à partir de self.current_palette."""
+        for widget in self.palette_swatches_frame.winfo_children():
+            widget.destroy()
+
+        if self.current_palette is None or len(self.current_palette) == 0:
+            self.palette_frame.config(text="Palette utilisée")
+            ttk.Label(self.palette_swatches_frame, text="Aucune palette disponible pour le moment.",
+                      foreground="gray").grid(row=0, column=0, padx=5, pady=5)
+            return
+
+        self.palette_frame.config(
+            text=f"Palette utilisée ({len(self.current_palette)} couleurs)")
+        cols = 16
+        for i, color in enumerate(self.current_palette):
+            r, g, b = int(color[0]), int(color[1]), int(color[2])
+            hex_color = f"#{r:02x}{g:02x}{b:02x}"
+            cell = ttk.Frame(self.palette_swatches_frame, padding=3)
+            cell.grid(row=i // cols, column=i % cols)
+            tk.Frame(cell, bg=hex_color, width=28, height=28,
+                     relief="solid", borderwidth=1).pack()
+
     def reset(self):
         self.n_colors.set(16)
         self.keep_aspect.set(True)
@@ -374,7 +435,9 @@ class ColorReducerApp:
             self.height_var.set(h)
             self._syncing_dims = False
         self.processed_image = None
+        self.current_palette = None
         self.resize_preview()
+        self.refresh_palette_display()
         self.update_preview()
 
 def main():

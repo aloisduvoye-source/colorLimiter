@@ -62,6 +62,7 @@ def process_image(image, n_colors, size=None, sample_size=100_000):
     """
     Traite une image PIL complète.
     Redimensionne vers `size` (largeur, hauteur) si fourni.
+    Retourne (image_palettisée, palette) où palette est un tableau (N, 3) de couleurs RGB.
     """
     has_alpha = "A" in image.getbands()
     img = image.convert("RGBA") if has_alpha else image.convert("RGB")
@@ -72,12 +73,12 @@ def process_image(image, n_colors, size=None, sample_size=100_000):
 
     width, height = img.size
     pixels = np.asarray(img)
-    
+
     rgb = pixels[:, :, :3]
     alpha = pixels[:, :, 3] if has_alpha else None
     pixels_rgb = rgb.reshape(-1, 3)
-    
+
     palette = compute_palette(pixels_rgb, n_colors, sample_size)
     labels = quantize_image(pixels_rgb, palette)
-    
-    return create_paletted_image(width, height, labels, palette, alpha)
+
+    return create_paletted_image(width, height, labels, palette, alpha), palette
