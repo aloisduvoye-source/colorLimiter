@@ -47,13 +47,32 @@ class ColorReducerApp:
         
         self.file_label = ttk.Label(top_frame, text="Aucun fichier", foreground="gray")
         self.file_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
+
+        # Panneau palette (intégré, toujours affiché, en haut de l'écran)
+        self.palette_frame = ttk.LabelFrame(main, text="Palette utilisée", padding=5)
+        self.palette_frame.pack(fill=tk.X, pady=(0, 10))
+        self.palette_canvas = tk.Canvas(self.palette_frame, height=100, highlightthickness=0)
+        palette_scrollbar = ttk.Scrollbar(
+            self.palette_frame, orient="vertical", command=self.palette_canvas.yview)
+        self.palette_swatches_frame = ttk.Frame(self.palette_canvas)
+
+        self.palette_swatches_frame.bind(
+            "<Configure>",
+            lambda e: self.palette_canvas.configure(scrollregion=self.palette_canvas.bbox("all")))
+        self.palette_canvas.create_window((0, 0), window=self.palette_swatches_frame, anchor="nw")
+        self.palette_canvas.configure(yscrollcommand=palette_scrollbar.set)
+
+        self.palette_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        palette_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.refresh_palette_display()
+
         # Frame des images (côte à côte)
-        images_frame = ttk.Frame(main)
-        images_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        self.images_frame = ttk.Frame(main)
+        self.images_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         
         # Original
-        left_panel = ttk.LabelFrame(images_frame, text="Original", padding=5)
+        left_panel = ttk.LabelFrame(self.images_frame, text="Original", padding=5)
         left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
         
         # Canvas avec gestion du redimensionnement
@@ -62,7 +81,7 @@ class ColorReducerApp:
         self.original_canvas.bind("<Configure>", lambda e: self.resize_original())
         
         # Résultat
-        right_panel = ttk.LabelFrame(images_frame, text="Aperçu (PNG palettisé)", padding=5)
+        right_panel = ttk.LabelFrame(self.images_frame, text="Aperçu (PNG palettisé)", padding=5)
         right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
         
         self.preview_canvas = tk.Canvas(right_panel, bg="#2e2e2e", highlightthickness=0)
@@ -136,29 +155,8 @@ class ColorReducerApp:
         
         ttk.Button(btn_frame, text="🔄 Réinitialiser",
                    command=self.reset).pack(side=tk.LEFT, padx=5)
-        self.palette_toggle_btn = ttk.Button(
-            btn_frame, text="🎨 Afficher la palette", command=self.toggle_palette)
-        self.palette_toggle_btn.pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="💾 Exporter en PNG",
                    command=self.export).pack(side=tk.RIGHT, padx=5)
-
-        # Panneau palette (intégré, masqué par défaut)
-        self.palette_frame = ttk.LabelFrame(main, text="Palette utilisée", padding=5)
-        self.palette_canvas = tk.Canvas(self.palette_frame, height=100, highlightthickness=0)
-        palette_scrollbar = ttk.Scrollbar(
-            self.palette_frame, orient="vertical", command=self.palette_canvas.yview)
-        self.palette_swatches_frame = ttk.Frame(self.palette_canvas)
-
-        self.palette_swatches_frame.bind(
-            "<Configure>",
-            lambda e: self.palette_canvas.configure(scrollregion=self.palette_canvas.bbox("all")))
-        self.palette_canvas.create_window((0, 0), window=self.palette_swatches_frame, anchor="nw")
-        self.palette_canvas.configure(yscrollcommand=palette_scrollbar.set)
-
-        self.palette_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        palette_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        self.refresh_palette_display()
 
         # Barre de progression / statut
         self.status = ttk.Label(main, text="Prêt", foreground="gray")
@@ -392,15 +390,6 @@ class ColorReducerApp:
                 self.root.after(0, lambda: self.root.config(cursor=""))
                 
         threading.Thread(target=task, daemon=True).start()
-
-    def toggle_palette(self):
-        """Affiche ou masque le panneau de palette intégré."""
-        if self.palette_frame.winfo_ismapped():
-            self.palette_frame.pack_forget()
-            self.palette_toggle_btn.config(text="🎨 Afficher la palette")
-        else:
-            self.palette_frame.pack(fill=tk.X, pady=5, before=self.status)
-            self.palette_toggle_btn.config(text="🎨 Masquer la palette")
 
     def refresh_palette_display(self):
         """Reconstruit les pastilles de couleurs à partir de self.current_palette."""
